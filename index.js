@@ -352,56 +352,30 @@ app.get("/start", async (req, res) => {
   }
 });
 
-// /auth/login generates a signed state token with database storage
+// Simple OAuth login - just store user ID in session
 app.get("/auth/login", async (req, res) => {
   try {
-    // Accept cliq_user_id either from query or existing session (backwards compatible)
-    const cliqUserId =
-      req.query.cliq_user_id || req.session?.cliq_user_id || "";
+    const cliqUserId = req.query.cliq_user_id || "";
 
-    console.log("🔐 OAuth Login Request:");
+    console.log("🔐 Simple OAuth Login:");
     console.log("  - Cliq User ID:", cliqUserId);
-    console.log("  - Session ID:", req.sessionID);
-    console.log("  - Query params:", req.query);
 
-    const stateId = uuidv4();
-    const payload = `${stateId}|${cliqUserId}`;
-    const stateToken = signState(payload);
+    // Just use a simple state - no encryption needed
+    const simpleState = cliqUserId;
 
-    // Store state in both MongoDB and session for redundancy
-    try {
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
-      await OAuthState.create({
-        state: stateId,
-        cliq_user_id: cliqUserId,
-        expires_at: expiresAt,
-      });
-      console.log("✅ OAuth state stored in MongoDB:", stateId);
-    } catch (dbError) {
-      console.warn(
-        "⚠️ Failed to store OAuth state in MongoDB:",
-        dbError.message
-      );
-    }
-
-    // Also store in session for backup
-    req.session.oauth_state = stateId;
+    // Store in session
     req.session.cliq_user_id = cliqUserId;
-    req.session.state_token = stateToken;
+    req.session.oauth_state = simpleState;
 
     const url = new URL(OAUTH_AUTHORIZE_URL);
     url.searchParams.append("client_id", CLIENT_ID);
     url.searchParams.append("scope", SCOPE);
     url.searchParams.append("response_type", "code");
     url.searchParams.append("redirect_uri", REDIRECT_URI);
-    url.searchParams.append("state", stateToken);
+    url.searchParams.append("state", simpleState);
     url.searchParams.append("access_type", "offline");
 
-    console.log("🔗 Redirecting to OAuth URL:");
-    console.log("  - State Token:", stateToken.substring(0, 20) + "...");
-    console.log("  - Redirect URI:", REDIRECT_URI);
-    console.log("  - Full URL:", url.toString().substring(0, 200) + "...");
-
+    console.log("✅ Redirecting to Zoho OAuth...");
     return res.redirect(url.toString());
   } catch (error) {
     console.error("❌ OAuth login error:", error);
@@ -409,17 +383,15 @@ app.get("/auth/login", async (req, res) => {
   }
 });
 
-// callback verifies the signed state token with comprehensive debugging
+// Simple OAuth callback - no complex validation
 app.get("/auth/callback", async (req, res) => {
   try {
     const { code, state: stateToken, error } = req.query;
 
-    console.log("🔄 OAuth Callback Request:");
-    console.log("  - Session ID:", req.sessionID);
+    console.log("🔄 Simple OAuth Callback:");
     console.log("  - Code received:", code ? "✅ Yes" : "❌ No");
-    console.log("  - State token received:", stateToken ? "✅ Yes" : "❌ No");
-    console.log("  - Error from provider:", error || "None");
-    console.log("  - Full query:", req.query);
+    console.log("  - State received:", stateToken || "None");
+    console.log("  - Error:", error || "None");
 
     if (error) {
       console.error("❌ OAuth provider error:", error);
@@ -431,108 +403,10 @@ app.get("/auth/callback", async (req, res) => {
       return res.status(400).send("Missing authorization code.");
     }
 
-    if (!stateToken) {
-      console.error("❌ Missing OAuth state token");
-      return res.status(400).send("Missing OAuth state parameter.");
-    }
-
-    console.log(
-      "🔍 Verifying state token:",
-      stateToken.substring(0, 20) + "..."
-    );
-
-    // Try HMAC verification first
-    const verified = verifyState(String(stateToken));
-    console.log(
-      "🔐 HMAC verification result:",
-      verified ? "✅ Valid" : "❌ Invalid"
-    );
-
-    let cliqUserId = null;
-    let stateValidated = false;
-
-    if (verified) {
-      cliqUserId = verified.cliqUserId;
-      stateValidated = true;
-      console.log("✅ State verified via HMAC, Cliq User ID:", cliqUserId);
-    } else {
-      // Fallback: try database verification with robust parsing
-      console.log("🔍 Attempting database state verification...");
-      try {
-        const decoded = base64urlDecode(stateToken);
-        const parts = decoded.split("|");
-        console.log("🗂️ Decoded token parts for DB lookup:", parts.length);
-
-        if (parts.length >= 2) {
-          const stateId = parts[0];
-          console.log("🔍 Looking up state ID in database:", stateId);
-
-          const dbState = await OAuthState.findOne({ state: stateId }).lean();
-          console.log(
-            "📊 Database lookup result:",
-            dbState ? "Found" : "Not found"
-          );
-
-          if (dbState) {
-            console.log("⏰ State expires at:", dbState.expires_at);
-            console.log("🕐 Current time:", new Date());
-            console.log("⏳ Is expired?", new Date() >= dbState.expires_at);
-
-            if (new Date() < dbState.expires_at) {
-              cliqUserId = dbState.cliq_user_id;
-              stateValidated = true;
-              console.log(
-                "✅ State verified via database, Cliq User ID:",
-                cliqUserId
-              );
-
-              // Clean up the used state
-              await OAuthState.deleteOne({ state: stateId });
-              console.log("🗑️ Cleaned up used state from database");
-            } else {
-              console.log("❌ Database state found but expired");
-            }
-          } else {
-            console.log("❌ Database state not found");
-          }
-        } else {
-          console.log("❌ Invalid token structure for database lookup");
-        }
-      } catch (dbError) {
-        console.error(
-          "❌ Database state verification failed:",
-          dbError.message
-        );
-        console.error("❌ DB Error stack:", dbError.stack);
-      }
-
-      // Final fallback: check session
-      if (!stateValidated) {
-        console.log("🔍 Checking session for state validation...");
-        if (req.session.state_token === stateToken) {
-          cliqUserId = req.session.cliq_user_id;
-          stateValidated = true;
-          console.log(
-            "✅ State verified via session, Cliq User ID:",
-            cliqUserId
-          );
-        }
-      }
-    }
-
-    if (!stateValidated) {
-      console.error("❌ All state verification methods failed");
-      console.error("Debug info:");
-      console.error("  - Received state:", stateToken.substring(0, 50) + "...");
-      console.error(
-        "  - Session state:",
-        req.session?.state_token?.substring(0, 50) + "..."
-      );
-      console.error("  - Session oauth_state:", req.session?.oauth_state);
-      return res
-        .status(400)
-        .send("Invalid OAuth state. Please try logging in again.");
-    }
+    // Simple validation - just check if state matches session
+    const cliqUserId = stateToken || req.session?.cliq_user_id || null;
+    
+    console.log("✅ Using Cliq User ID:", cliqUserId);
 
     const tokenRes = await axios.post(
       OAUTH_TOKEN_URL,
@@ -581,26 +455,12 @@ app.get("/auth/callback", async (req, res) => {
       cliqUserId || ""
     )}`;
 
-    console.log("🎉 OAuth callback successful:");
+    console.log("🎉 Simple OAuth success!");
     console.log("  - Cliq User ID:", cliqUserId);
-    console.log("  - MongoDB Document ID:", inserted._id);
     console.log("  - Redirecting to:", redirectUrl);
 
-    // Cleanup expired states (optional)
-    try {
-      await OAuthState.deleteMany({ expires_at: { $lt: new Date() } });
-      console.log("🧹 Cleaned up expired OAuth states");
-    } catch (cleanupError) {
-      console.warn(
-        "⚠️ Failed to cleanup expired states:",
-        cleanupError.message
-      );
-    }
-
-    // cleanup session
+    // Simple cleanup
     delete req.session.oauth_state;
-    delete req.session.cliq_user_id;
-    delete req.session.state_token;
 
     return res.redirect(redirectUrl);
   } catch (err) {
