@@ -1,0 +1,21 @@
+{
+  "name": "catalyst",
+  "version": "1.0.0",
+  "description": "Basic Node Template With Routing For Catalyst App Logic",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {},
+  "dependencies": {
+    "@google/genai": "^1.30.0",
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "mongoose": "^8.0.0",
+    "multer": "^2.0.2",
+    "uuid": "^8.3.2",
+    "zcatalyst-sdk-node": "^3.1.1"
+  }
+}

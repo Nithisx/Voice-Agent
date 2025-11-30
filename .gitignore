@@ -1,0 +1,10 @@
+/node_modules/
+/VoiceRecorder-Fixed.jsx
+.env
+/VoiceTestDebug.jsx
+/vite.config.example.js
+/test.js
+/test-cors.sh
+/test-ai-intent.js
+/cors-test.html
+
