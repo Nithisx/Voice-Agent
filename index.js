@@ -116,14 +116,15 @@ app.use(
     resave: false,
     saveUninitialized: false, // Don't save uninitialized sessions
     store: MongoStore.create({
-      mongoUrl: "mongodb+srv://nithishkumarnk182005_db_user:3LZEOEORRiL1deWW@cluster0.l7dkvqq.mongodb.net/?appName=Cluster0",
+      mongoUrl:
+        "mongodb+srv://nithishkumarnk182005_db_user:3LZEOEORRiL1deWW@cluster0.l7dkvqq.mongodb.net/?appName=Cluster0",
       touchAfter: 24 * 3600, // lazy session update
-      ttl: 14 * 24 * 60 * 60 // 14 days
+      ttl: 14 * 24 * 60 * 60, // 14 days
     }),
-    cookie: { 
+    cookie: {
       secure: false, // set true if HTTPS only
       httpOnly: true,
-      maxAge: 1000 * 60 * 60 * 24 // 1 day
+      maxAge: 1000 * 60 * 60 * 24, // 1 day
     },
   })
 );
@@ -171,16 +172,16 @@ app.get("/start", async (req, res) => {
 
     // Check MongoDB for existing OAuth token
     try {
-      const existingToken = await OAuthToken.findOne({ 
+      const existingToken = await OAuthToken.findOne({
         external_user_id: cliqUserId,
-        provider: "Zoho"
+        provider: "Zoho",
       });
-      
+
       console.log("✅ MongoDB query completed");
 
       if (existingToken) {
         console.log("🎉 Found existing token, redirecting to voice UI");
-        
+
         // Check if token is still valid (if expires_at is set)
         const now = Math.floor(Date.now() / 1000);
         if (existingToken.expires_at && existingToken.expires_at < now) {
@@ -206,11 +207,10 @@ app.get("/start", async (req, res) => {
         }
       }
 
-        console.log("🆕 No existing valid token found, starting OAuth flow");
+      console.log("🆕 No existing valid token found, starting OAuth flow");
       // no token → store cliq_user_id in session and go through OAuth login
       req.session.cliq_user_id = cliqUserId;
       return res.redirect("/auth/login");
-
     } catch (mongoError) {
       console.error("❌ MongoDB query error:", mongoError);
       // If MongoDB fails, proceed to OAuth (better to authenticate than block user)
@@ -218,7 +218,6 @@ app.get("/start", async (req, res) => {
       req.session.cliq_user_id = cliqUserId;
       return res.redirect("/auth/login");
     }
-
   } catch (err) {
     console.error("Start route error details:", {
       message: err.message,
@@ -301,7 +300,7 @@ app.get("/auth/callback", async (req, res) => {
       refresh_token: refreshToken,
       expires_at: expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : null,
       scope: SCOPE,
-      profile: userProfile
+      profile: userProfile,
     };
 
     // Use upsert to update existing record or create new one
