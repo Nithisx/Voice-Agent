@@ -1,11 +1,12 @@
 import express from "express";
 import session from "express-session";
+import MongoStore from "connect-mongo";
 import axios from "axios";
 import { v4 as uuidv4 } from "uuid";
-import catalystSDK from "zcatalyst-sdk-node";
 import dotenv from "dotenv";
 import cors from "cors";
 import connectDB from "./Db/db.js";
+import OAuthToken from "./Models/oauthModel.js";
 
 dotenv.config();
 
@@ -108,13 +109,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// session for OAuth state + cliq_user_id
+// session for OAuth state + cliq_user_id with MongoDB store for Render
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "change_this_in_production",
     resave: false,
-    saveUninitialized: true,
-    cookie: { secure: false }, // set true if HTTPS + behind proxy
+    saveUninitialized: false, // Don't save uninitialized sessions
+    store: MongoStore.create({
+      mongoUrl: "mongodb+srv://nithishkumarnk182005_db_user:3LZEOEORRiL1deWW@cluster0.l7dkvqq.mongodb.net/?appName=Cluster0",
+      touchAfter: 24 * 3600, // lazy session update
+      ttl: 14 * 24 * 60 * 60 // 14 days
+    }),
+    cookie: { 
+      secure: false, // set true if HTTPS only
+      httpOnly: true,
+      maxAge: 1000 * 60 * 60 * 24 // 1 day
+    },
   })
 );
 
@@ -159,60 +169,56 @@ app.get("/start", async (req, res) => {
 
     console.log("🔍 Checking for existing token for user:", cliqUserId);
 
-    let catalystApp, zcql;
+    // Check MongoDB for existing OAuth token
     try {
-      catalystApp = catalystSDK.initialize(req);
-      console.log("✅ Catalyst SDK initialized successfully");
-      zcql = catalystApp.zcql();
-      console.log("✅ ZCQL instance created successfully");
-    } catch (initError) {
-      console.error("❌ Catalyst SDK initialization failed:", initError);
-      // If initialization fails, proceed to OAuth without checking for existing tokens
-      req.session.cliq_user_id = cliqUserId;
-      return res.redirect("/auth/login");
-    }
+      const existingToken = await OAuthToken.findOne({ 
+        external_user_id: cliqUserId,
+        provider: "Zoho"
+      });
+      
+      console.log("✅ MongoDB query completed");
 
-    // Use ZCQL to check if a row exists for this external_user_id
-    const query = `SELECT * FROM oauth_tokens WHERE external_user_id = '${cliqUserId}'`;
-    console.log("📋 Executing ZCQL query:", query);
-
-    let result;
-    try {
-      result = await zcql.executeZCQLQuery(query);
-      console.log("✅ ZCQL query result:", JSON.stringify(result, null, 2));
-    } catch (zcqlError) {
-      console.error("❌ ZCQL query error:", zcqlError);
-      // If ZCQL fails, assume no token exists and proceed to OAuth
-      console.log("🔄 ZCQL failed, proceeding to OAuth login");
-      req.session.cliq_user_id = cliqUserId;
-      return res.redirect("/auth/login");
-    }
-
-    // Check if result exists and has data
-    if (result && Array.isArray(result) && result.length > 0) {
-      console.log("🎉 Found existing token, redirecting to voice UI");
-      // token exists → go directly to frontend voice UI
-      if (FRONTEND_VOICE_URL) {
-        const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
-          cliqUserId
-        )}`;
-        return res.redirect(redirectUrl);
-      } else {
-        // Fallback if FRONTEND_VOICE_URL is not set
-        return res.json({
-          success: true,
-          message: "User authenticated successfully",
-          cliq_user_id: cliqUserId,
-          has_token: true,
-          redirect_note: "FRONTEND_VOICE_URL not configured",
-        });
+      if (existingToken) {
+        console.log("🎉 Found existing token, redirecting to voice UI");
+        
+        // Check if token is still valid (if expires_at is set)
+        const now = Math.floor(Date.now() / 1000);
+        if (existingToken.expires_at && existingToken.expires_at < now) {
+          console.log("⚠️ Token expired, removing and starting OAuth flow");
+          await OAuthToken.deleteOne({ _id: existingToken._id });
+        } else {
+          // Token exists and is valid → go directly to frontend voice UI
+          if (FRONTEND_VOICE_URL) {
+            const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
+              cliqUserId
+            )}`;
+            return res.redirect(redirectUrl);
+          } else {
+            // Fallback if FRONTEND_VOICE_URL is not set
+            return res.json({
+              success: true,
+              message: "User authenticated successfully",
+              cliq_user_id: cliqUserId,
+              has_token: true,
+              redirect_note: "FRONTEND_VOICE_URL not configured",
+            });
+          }
+        }
       }
+
+        console.log("🆕 No existing valid token found, starting OAuth flow");
+      // no token → store cliq_user_id in session and go through OAuth login
+      req.session.cliq_user_id = cliqUserId;
+      return res.redirect("/auth/login");
+
+    } catch (mongoError) {
+      console.error("❌ MongoDB query error:", mongoError);
+      // If MongoDB fails, proceed to OAuth (better to authenticate than block user)
+      console.log("🔄 MongoDB failed, proceeding to OAuth login");
+      req.session.cliq_user_id = cliqUserId;
+      return res.redirect("/auth/login");
     }
 
-    console.log("🆕 No existing token found, starting OAuth flow");
-    // no token → store cliq_user_id in session and go through OAuth login
-    req.session.cliq_user_id = cliqUserId;
-    return res.redirect("/auth/login");
   } catch (err) {
     console.error("Start route error details:", {
       message: err.message,
@@ -287,22 +293,24 @@ app.get("/auth/callback", async (req, res) => {
 
     const cliqUserId = req.session.cliq_user_id || null;
 
-    const catalystApp = catalystSDK.initialize(req);
-    const datastore = catalystApp.datastore();
-    const table = datastore.table("oauth_tokens");
-
-    const row = {
+    // Save token to MongoDB
+    const oauthData = {
       provider: "Zoho",
       external_user_id: cliqUserId,
       access_token: accessToken,
       refresh_token: refreshToken,
       expires_at: expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : null,
       scope: SCOPE,
-      created_at: new Date().toISOString(),
+      profile: userProfile
     };
 
-    const inserted = await table.insertRow(row);
-    console.log("Inserted oauth row:", inserted);
+    // Use upsert to update existing record or create new one
+    const saved = await OAuthToken.findOneAndUpdate(
+      { external_user_id: cliqUserId, provider: "Zoho" },
+      oauthData,
+      { upsert: true, new: true, runValidators: true }
+    );
+    console.log("Saved OAuth token to MongoDB:", saved._id);
 
     const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
       cliqUserId || ""
