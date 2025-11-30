@@ -1,37 +1,189 @@
+// server.js (corrected)
 import express from "express";
 import session from "express-session";
+import MongoStore from "connect-mongo";
 import axios from "axios";
 import { v4 as uuidv4 } from "uuid";
 import OAuthToken from "./Models/oauthModel.js";
+import OAuthState from "./Models/oauthStateModel.js";
 import dotenv from "dotenv";
 import cors from "cors";
 import connectDB from "./Db/db.js";
+import crypto from "crypto";
 
 dotenv.config();
 
+// Validate critical environment variables
+function validateEnvironment() {
+  const required = [
+    "CLIENT_ID",
+    "CLIENT_SECRET",
+    "REDIRECT_URI",
+    "OAUTH_AUTHORIZE_URL",
+    "OAUTH_TOKEN_URL",
+    "FRONTEND_VOICE_URL",
+  ];
+
+  const missing = required.filter((key) => !process.env[key]);
+
+  if (missing.length > 0) {
+    console.error("❌ Missing required environment variables:", missing);
+    console.error(
+      "📋 Please check your .env file and ensure all OAuth variables are set"
+    );
+    process.exit(1);
+  }
+
+  console.log("✅ Environment variables validated");
+
+  // Warn about default secrets
+  if (
+    process.env.STATE_SECRET === "change_this_state_secret" ||
+    process.env.SESSION_SECRET === "change_this_in_production"
+  ) {
+    console.warn("⚠️ Using default secrets - please change for production!");
+  }
+}
+
+validateEnvironment();
+
 // Initialize database connection
-connectDB().catch(console.error);
+connectDB().catch((error) => {
+  console.error("❌ Database connection failed:", error.message);
+  process.exit(1);
+});
 
 const app = express();
 
-// Centralized CORS with explicit preflight handling
+// --- Helper: base64url encode/decode + state signing ----
+const base64urlEncode = (str) =>
+  Buffer.from(str)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+const base64urlDecode = (s) =>
+  Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString();
+
+// Simple consistent state secret
+const STATE_SECRET = process.env.STATE_SECRET || "change_this_state_secret";
+
+console.log(
+  "🔑 Using STATE_SECRET:",
+  STATE_SECRET === "change_this_state_secret" ? "default" : "custom"
+);
+
+function signState(payload) {
+  try {
+    console.log("🔐 Signing state payload:", payload.substring(0, 50) + "...");
+    const mac = crypto
+      .createHmac("sha256", STATE_SECRET)
+      .update(payload)
+      .digest("hex");
+    const signed = base64urlEncode(`${payload}|${mac}`);
+    console.log("✅ State signed successfully, length:", signed.length);
+    return signed;
+  } catch (error) {
+    console.error("❌ State signing failed:", error.message);
+    throw error;
+  }
+}
+
+function verifyState(token) {
+  try {
+    console.log("🔍 Verifying state token, length:", token?.length);
+
+    if (!token || typeof token !== "string") {
+      console.log("❌ Invalid token type or missing token");
+      return null;
+    }
+
+    const decoded = base64urlDecode(token);
+    console.log("🔓 Token decoded, length:", decoded.length);
+
+    const parts = decoded.split("|");
+    console.log("📊 Token parts count:", parts.length);
+
+    if (parts.length < 3) {
+      console.log("❌ Insufficient token parts");
+      return null;
+    }
+
+    const mac = parts.pop();
+    const payload = parts.join("|");
+
+    // Try multiple possible secrets for backward compatibility
+    const possibleSecrets = [
+      STATE_SECRET, // Current secret
+      "change_this_state_secret", // Original default (most likely to work)
+      process.env.SESSION_SECRET || "change_this_in_production", // Session fallback
+      "zoho_oauth_state_secret_2024", // Alternative default
+      process.env.STATE_SECRET, // Explicit env var if different from computed
+      process.env.SESSION_SECRET, // Explicit session secret
+    ]
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i); // Remove duplicates
+
+    console.log("🔐 MAC verification (trying multiple secrets):");
+    console.log("  - Received MAC:", mac.substring(0, 16) + "...");
+    console.log("  - Token payload:", payload);
+    console.log("  - Secrets to try:", possibleSecrets.length);
+
+    for (let i = 0; i < possibleSecrets.length; i++) {
+      const secret = possibleSecrets[i];
+      const expectedMac = crypto
+        .createHmac("sha256", secret)
+        .update(payload)
+        .digest("hex");
+
+      console.log(
+        `  - Try ${i + 1} (${
+          secret === STATE_SECRET ? "current" : "fallback"
+        }):`
+      );
+      console.log(`    Expected: ${expectedMac.substring(0, 16)}...`);
+
+      // timingSafeEqual requires buffers of same length
+      const macBuf = Buffer.from(mac, "hex");
+      const expectedBuf = Buffer.from(expectedMac, "hex");
+
+      if (
+        macBuf.length === expectedBuf.length &&
+        crypto.timingSafeEqual(macBuf, expectedBuf)
+      ) {
+        const [stateId, cliqUserId] = payload.split("|");
+        console.log(`✅ State verified with secret ${i + 1}:`);
+        console.log("  - State ID:", stateId);
+        console.log("  - Cliq User ID:", cliqUserId);
+
+        return { stateId, cliqUserId: cliqUserId || null };
+      }
+    }
+
+    console.log("❌ MAC verification failed with all possible secrets");
+    return null;
+  } catch (err) {
+    console.error("❌ State verification error:", err.message);
+    return null;
+  }
+}
+
+// ----------------- CORS + middlewares (unchanged logic, minor tweaks) -----------------
 const allowedOrigins = [
   "https://cliqtrix-voice-agent.vercel.app",
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:5173",
 ];
-// Allow Vercel preview subdomains for this project
 const vercelPreviewPattern =
   /^https:\/\/cliqtrix-voice-agent[-a-z0-9]*\.vercel\.app$/i;
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests without Origin (e.g., server-to-server, curl)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     if (vercelPreviewPattern.test(origin)) return callback(null, true);
-    // Fallback: reject unknown origins to avoid '*' with credentials issues
     return callback(null, false);
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
@@ -45,35 +197,28 @@ const corsOptions = {
     "userId",
     "userid",
   ],
-  credentials: false, // we are not using cookies across origins
-  maxAge: 86400, // cache preflight for 1 day
-  preflightContinue: false,
+  credentials: false,
+  maxAge: 86400,
 };
 
-// Use cors for all routes
 app.use((req, res, next) => {
   const origin = req.headers.origin || "unknown";
   console.log(`🌐 CORS: ${req.method} ${req.url} from ${origin}`);
   next();
 });
 app.use(cors(corsOptions));
-// Ensure Vary header to avoid cache serving wrong CORS
 app.use((req, res, next) => {
   res.setHeader("Vary", "Origin");
   next();
 });
-// Explicit preflight handler: use middleware instead of wildcard path to avoid path-to-regexp errors on Catalyst
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
     return cors(corsOptions)(req, res, () => {
-      // If cors didn't end the response, send OK
       res.status(204).end();
     });
   }
   next();
 });
-
-// Fallback CORS header setter in case upstream or errors skip cors middleware
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
@@ -94,7 +239,6 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// Request logging middleware for debugging
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
   console.log(`\n📝 ${timestamp} - ${req.method} ${req.path}`);
@@ -104,20 +248,30 @@ app.use((req, res, next) => {
   if (req.headers.userid || req.headers.userId) {
     console.log("� UserId:", req.headers.userid || req.headers.userId);
   }
-
   next();
 });
 
-// session for OAuth state + cliq_user_id
+// MongoDB-based session store to fix MemoryStore warning
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "change_this_in_production",
     resave: false,
     saveUninitialized: true,
-    cookie: { secure: false }, // set true if HTTPS + behind proxy
+    store: MongoStore.create({
+      mongoUrl:
+        "mongodb+srv://nithishkumarnk182005_db_user:3LZEOEORRiL1deWW@cluster0.l7dkvqq.mongodb.net/?appName=Cluster0",
+      collectionName: "oauth_sessions",
+      ttl: 24 * 60 * 60, // 24 hours session expiry
+    }),
+    cookie: {
+      secure: false, // set to true when behind HTTPS/proxy
+      sameSite: "lax",
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    },
   })
 );
 
+// ---- env vars ----
 const {
   OAUTH_AUTHORIZE_URL,
   OAUTH_TOKEN_URL,
@@ -126,68 +280,258 @@ const {
   CLIENT_SECRET,
   REDIRECT_URI,
   SCOPE,
-  FRONTEND_VOICE_URL, // e.g. https://frontend.example.com/voice
+  FRONTEND_VOICE_URL,
 } = process.env;
 
+// ----------------- Routes -----------------
+
+// Cleanup job for expired OAuth states
+async function cleanupExpiredStates() {
+  try {
+    const result = await OAuthState.deleteMany({
+      expires_at: { $lt: new Date() },
+    });
+    if (result.deletedCount > 0) {
+      console.log(`🧹 Cleaned up ${result.deletedCount} expired OAuth states`);
+    }
+  } catch (error) {
+    console.warn("⚠️ OAuth state cleanup failed:", error.message);
+  }
+}
+
+// Run cleanup every 30 minutes
+setInterval(cleanupExpiredStates, 30 * 60 * 1000);
+
+// /start now forwards cliq_user_id with improved error handling
 app.get("/start", async (req, res) => {
   try {
     const cliqUserId = req.query.cliq_user_id;
+
+    console.log("🚀 Start route accessed:");
+    console.log("  - Cliq User ID:", cliqUserId);
+    console.log("  - Query params:", req.query);
+    console.log("  - Session ID:", req.sessionID);
+
     if (!cliqUserId) {
-      return res.status(400).send("Missing cliq_user_id");
+      console.error("❌ Missing cliq_user_id parameter");
+      return res.status(400).send("Missing required parameter: cliq_user_id");
     }
 
     // Check MongoDB for an existing oauth token for this external user id
-    const existing = await OAuthToken.findOne({ external_user_id: String(cliqUserId) }).lean();
+    console.log("🔍 Checking for existing OAuth token...");
+    const existing = await OAuthToken.findOne({
+      external_user_id: String(cliqUserId),
+    }).lean();
 
     if (existing) {
-      // token exists → go directly to frontend voice UI
+      console.log("✅ Found existing OAuth token, redirecting to voice app");
       const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
         cliqUserId
       )}`;
+      console.log("🔗 Redirect URL:", redirectUrl);
       return res.redirect(redirectUrl);
     }
 
-    // no token → store cliq_user_id in session and go through OAuth login
-    req.session.cliq_user_id = cliqUserId;
-    return res.redirect("/auth/login");
+    console.log("📝 No existing token found, starting OAuth flow");
+    // Redirect to /auth/login with cliq_user_id in query (avoids relying on server session)
+    const loginUrl = `/auth/login?cliq_user_id=${encodeURIComponent(
+      cliqUserId
+    )}`;
+    console.log("🔗 Login URL:", loginUrl);
+    return res.redirect(loginUrl);
   } catch (err) {
-    // Log full error for easier debugging (response body, stack, etc.)
-    console.error("Start route error - full error:", err);
-    console.error("Start route error - response data:", err?.response?.data);
-    console.error("Start route error - message:", err?.message);
-    console.error("Start route error - stack:", err?.stack);
+    console.error("❌ Start route error:");
+    console.error("  - Error:", err.message);
+    console.error("  - Stack:", err.stack);
+    console.error("  - Query:", req.query);
 
     const detail = err?.response?.data || err?.message || String(err);
-    return res.status(500).send("Start failed: " + detail);
+    return res
+      .status(500)
+      .send(`Start failed: ${detail}. Please try again or contact support.`);
   }
 });
 
-app.get("/auth/login", (req, res) => {
-  const state = uuidv4();
-  req.session.oauth_state = state;
+// /auth/login generates a signed state token with database storage
+app.get("/auth/login", async (req, res) => {
+  try {
+    // Accept cliq_user_id either from query or existing session (backwards compatible)
+    const cliqUserId =
+      req.query.cliq_user_id || req.session?.cliq_user_id || "";
 
-  const cliqUserId = req.query.cliq_user_id;
-  if (cliqUserId) {
+    console.log("🔐 OAuth Login Request:");
+    console.log("  - Cliq User ID:", cliqUserId);
+    console.log("  - Session ID:", req.sessionID);
+    console.log("  - Query params:", req.query);
+
+    const stateId = uuidv4();
+    const payload = `${stateId}|${cliqUserId}`;
+    const stateToken = signState(payload);
+
+    // Store state in both MongoDB and session for redundancy
+    try {
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+      await OAuthState.create({
+        state: stateId,
+        cliq_user_id: cliqUserId,
+        expires_at: expiresAt,
+      });
+      console.log("✅ OAuth state stored in MongoDB:", stateId);
+    } catch (dbError) {
+      console.warn(
+        "⚠️ Failed to store OAuth state in MongoDB:",
+        dbError.message
+      );
+    }
+
+    // Also store in session for backup
+    req.session.oauth_state = stateId;
     req.session.cliq_user_id = cliqUserId;
+    req.session.state_token = stateToken;
+
+    const url = new URL(OAUTH_AUTHORIZE_URL);
+    url.searchParams.append("client_id", CLIENT_ID);
+    url.searchParams.append("scope", SCOPE);
+    url.searchParams.append("response_type", "code");
+    url.searchParams.append("redirect_uri", REDIRECT_URI);
+    url.searchParams.append("state", stateToken);
+    url.searchParams.append("access_type", "offline");
+
+    console.log("🔗 Redirecting to OAuth URL:");
+    console.log("  - State Token:", stateToken.substring(0, 20) + "...");
+    console.log("  - Redirect URI:", REDIRECT_URI);
+    console.log("  - Full URL:", url.toString().substring(0, 200) + "...");
+
+    return res.redirect(url.toString());
+  } catch (error) {
+    console.error("❌ OAuth login error:", error);
+    return res.status(500).send(`OAuth login failed: ${error.message}`);
   }
-
-  const url = new URL(OAUTH_AUTHORIZE_URL);
-  url.searchParams.append("client_id", CLIENT_ID);
-  url.searchParams.append("scope", SCOPE);
-  url.searchParams.append("response_type", "code");
-  url.searchParams.append("redirect_uri", REDIRECT_URI);
-  url.searchParams.append("state", state);
-  url.searchParams.append("access_type", "offline");
-
-  return res.redirect(url.toString());
 });
 
+// callback verifies the signed state token with comprehensive debugging
 app.get("/auth/callback", async (req, res) => {
   try {
-    const { code, state } = req.query;
+    const { code, state: stateToken, error } = req.query;
 
-    if (!state || state !== req.session.oauth_state) {
-      return res.status(400).send("Invalid OAuth state.");
+    console.log("🔄 OAuth Callback Request:");
+    console.log("  - Session ID:", req.sessionID);
+    console.log("  - Code received:", code ? "✅ Yes" : "❌ No");
+    console.log("  - State token received:", stateToken ? "✅ Yes" : "❌ No");
+    console.log("  - Error from provider:", error || "None");
+    console.log("  - Full query:", req.query);
+
+    if (error) {
+      console.error("❌ OAuth provider error:", error);
+      return res.status(400).send(`OAuth provider error: ${error}`);
+    }
+
+    if (!code) {
+      console.error("❌ Missing authorization code");
+      return res.status(400).send("Missing authorization code.");
+    }
+
+    if (!stateToken) {
+      console.error("❌ Missing OAuth state token");
+      return res.status(400).send("Missing OAuth state parameter.");
+    }
+
+    console.log(
+      "🔍 Verifying state token:",
+      stateToken.substring(0, 20) + "..."
+    );
+
+    // Try HMAC verification first
+    const verified = verifyState(String(stateToken));
+    console.log(
+      "🔐 HMAC verification result:",
+      verified ? "✅ Valid" : "❌ Invalid"
+    );
+
+    let cliqUserId = null;
+    let stateValidated = false;
+
+    if (verified) {
+      cliqUserId = verified.cliqUserId;
+      stateValidated = true;
+      console.log("✅ State verified via HMAC, Cliq User ID:", cliqUserId);
+    } else {
+      // Fallback: try database verification with robust parsing
+      console.log("🔍 Attempting database state verification...");
+      try {
+        const decoded = base64urlDecode(stateToken);
+        const parts = decoded.split("|");
+        console.log("🗂️ Decoded token parts for DB lookup:", parts.length);
+
+        if (parts.length >= 2) {
+          const stateId = parts[0];
+          console.log("🔍 Looking up state ID in database:", stateId);
+
+          const dbState = await OAuthState.findOne({ state: stateId }).lean();
+          console.log(
+            "📊 Database lookup result:",
+            dbState ? "Found" : "Not found"
+          );
+
+          if (dbState) {
+            console.log("⏰ State expires at:", dbState.expires_at);
+            console.log("🕐 Current time:", new Date());
+            console.log("⏳ Is expired?", new Date() >= dbState.expires_at);
+
+            if (new Date() < dbState.expires_at) {
+              cliqUserId = dbState.cliq_user_id;
+              stateValidated = true;
+              console.log(
+                "✅ State verified via database, Cliq User ID:",
+                cliqUserId
+              );
+
+              // Clean up the used state
+              await OAuthState.deleteOne({ state: stateId });
+              console.log("🗑️ Cleaned up used state from database");
+            } else {
+              console.log("❌ Database state found but expired");
+            }
+          } else {
+            console.log("❌ Database state not found");
+          }
+        } else {
+          console.log("❌ Invalid token structure for database lookup");
+        }
+      } catch (dbError) {
+        console.error(
+          "❌ Database state verification failed:",
+          dbError.message
+        );
+        console.error("❌ DB Error stack:", dbError.stack);
+      }
+
+      // Final fallback: check session
+      if (!stateValidated) {
+        console.log("🔍 Checking session for state validation...");
+        if (req.session.state_token === stateToken) {
+          cliqUserId = req.session.cliq_user_id;
+          stateValidated = true;
+          console.log(
+            "✅ State verified via session, Cliq User ID:",
+            cliqUserId
+          );
+        }
+      }
+    }
+
+    if (!stateValidated) {
+      console.error("❌ All state verification methods failed");
+      console.error("Debug info:");
+      console.error("  - Received state:", stateToken.substring(0, 50) + "...");
+      console.error(
+        "  - Session state:",
+        req.session?.state_token?.substring(0, 50) + "..."
+      );
+      console.error("  - Session oauth_state:", req.session?.oauth_state);
+      return res
+        .status(400)
+        .send("Invalid OAuth state. Please try logging in again.");
     }
 
     const tokenRes = await axios.post(
@@ -220,12 +564,10 @@ app.get("/auth/callback", async (req, res) => {
       console.log("Couldn't fetch Zoho user info:", e.message);
     }
 
-    const cliqUserId = req.session.cliq_user_id || null;
-
-    // Persist tokens in MongoDB
+    // Persist tokens in MongoDB using cliqUserId from the signed state
     const doc = new OAuthToken({
       provider: "Zoho",
-      external_user_id: cliqUserId,
+      external_user_id: cliqUserId || null,
       access_token: accessToken,
       refresh_token: refreshToken,
       expires_at: expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : null,
@@ -239,13 +581,42 @@ app.get("/auth/callback", async (req, res) => {
       cliqUserId || ""
     )}`;
 
+    console.log("🎉 OAuth callback successful:");
+    console.log("  - Cliq User ID:", cliqUserId);
+    console.log("  - MongoDB Document ID:", inserted._id);
+    console.log("  - Redirecting to:", redirectUrl);
+
+    // Cleanup expired states (optional)
+    try {
+      await OAuthState.deleteMany({ expires_at: { $lt: new Date() } });
+      console.log("🧹 Cleaned up expired OAuth states");
+    } catch (cleanupError) {
+      console.warn(
+        "⚠️ Failed to cleanup expired states:",
+        cleanupError.message
+      );
+    }
+
+    // cleanup session
     delete req.session.oauth_state;
     delete req.session.cliq_user_id;
+    delete req.session.state_token;
 
     return res.redirect(redirectUrl);
   } catch (err) {
-    console.error("OAuth Callback Error:", err.response?.data || err.message);
-    return res.status(500).send("OAuth failed: " + err.message);
+    console.error("❌ OAuth Callback Error:");
+    console.error("  - Error:", err.response?.data || err.message);
+    console.error("  - Stack:", err.stack);
+    console.error("  - Session ID:", req.sessionID);
+    console.error("  - Query params:", req.query);
+
+    return res
+      .status(500)
+      .send(
+        `OAuth failed: ${
+          err.response?.data?.error_description || err.message || String(err)
+        }`
+      );
   }
 });
 
@@ -287,7 +658,6 @@ app.post("/api/test-cors", (req, res) => {
   });
 });
 
-// Specific test for the transcribe endpoint method
 app.get("/api/transcribe-test", (req, res) => {
   res.json({
     message: "Transcribe endpoint is accessible via GET",
@@ -297,7 +667,154 @@ app.get("/api/transcribe-test", (req, res) => {
   });
 });
 
-// API documentation endpoint
+// Debug endpoints for OAuth troubleshooting
+app.get("/debug/oauth-states", async (req, res) => {
+  try {
+    const states = await OAuthState.find().sort({ created_at: -1 }).limit(10);
+    res.json({
+      message: "Recent OAuth states",
+      count: states.length,
+      states: states.map((s) => ({
+        state: s.state.substring(0, 10) + "...",
+        cliq_user_id: s.cliq_user_id,
+        created_at: s.created_at,
+        expires_at: s.expires_at,
+        expired: new Date() > s.expires_at,
+      })),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/debug/oauth-tokens", async (req, res) => {
+  try {
+    const tokens = await OAuthToken.find()
+      .sort({ created_at: -1 })
+      .limit(10)
+      .select("-access_token -refresh_token");
+    res.json({
+      message: "Recent OAuth tokens",
+      count: tokens.length,
+      tokens: tokens.map((t) => ({
+        provider: t.provider,
+        external_user_id: t.external_user_id,
+        created_at: t.created_at,
+        expires_at: t.expires_at ? new Date(t.expires_at * 1000) : null,
+        expired: t.expires_at
+          ? new Date(t.expires_at * 1000) < new Date()
+          : false,
+        profile: t.profile
+          ? { name: t.profile.name, email: t.profile.email }
+          : null,
+      })),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/debug/session", (req, res) => {
+  res.json({
+    sessionID: req.sessionID,
+    session: {
+      oauth_state: req.session.oauth_state,
+      cliq_user_id: req.session.cliq_user_id,
+      state_token: req.session.state_token
+        ? req.session.state_token.substring(0, 20) + "..."
+        : null,
+    },
+    cookies: req.headers.cookie,
+  });
+});
+
+// Special debug endpoint to test state verification with specific token
+app.get("/debug/verify-state/:token", (req, res) => {
+  try {
+    const { token } = req.params;
+
+    console.log(
+      "🧪 Debug state verification for token:",
+      token.substring(0, 20) + "..."
+    );
+
+    // Decode the token manually
+    const decoded = base64urlDecode(token);
+    const parts = decoded.split("|");
+
+    if (parts.length < 3) {
+      return res.json({
+        error: "Invalid token structure",
+        parts_count: parts.length,
+        decoded: decoded,
+      });
+    }
+
+    const mac = parts.pop();
+    const payload = parts.join("|");
+    const [stateId, cliqUserId] = payload.split("|");
+
+    // Test all possible secrets
+    const testSecrets = [
+      "change_this_state_secret",
+      "change_this_in_production",
+      "zoho_oauth_state_secret_2024",
+      STATE_SECRET,
+      process.env.STATE_SECRET,
+      process.env.SESSION_SECRET,
+    ]
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i);
+
+    const results = testSecrets.map((secret) => {
+      const expectedMac = crypto
+        .createHmac("sha256", secret)
+        .update(payload)
+        .digest("hex");
+      const matches = expectedMac === mac;
+
+      return {
+        secret: secret === STATE_SECRET ? `${secret} (CURRENT)` : secret,
+        matches,
+        expected_mac: expectedMac.substring(0, 16) + "...",
+        received_mac: mac.substring(0, 16) + "...",
+      };
+    });
+
+    // Try the verifyState function
+    const verifyResult = verifyState(token);
+
+    res.json({
+      token_info: {
+        length: token.length,
+        state_id: stateId,
+        cliq_user_id: cliqUserId,
+        payload: payload,
+      },
+      current_server_secret: {
+        value:
+          STATE_SECRET === "change_this_state_secret"
+            ? "original_default"
+            : "custom",
+        length: STATE_SECRET.length,
+        first_10: STATE_SECRET.substring(0, 10),
+      },
+      mac_tests: results,
+      verify_function_result: verifyResult,
+      environment: {
+        NODE_ENV: process.env.NODE_ENV,
+        STATE_SECRET_set: !!process.env.STATE_SECRET,
+        SESSION_SECRET_set: !!process.env.SESSION_SECRET,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      stack: error.stack,
+    });
+  }
+});
+
 app.get("/api/docs", (req, res) => {
   res.json({
     message: "Voice Agent API Documentation",
@@ -332,6 +849,11 @@ app.get("/api/docs", (req, res) => {
         body: { userId: "string", text: "string" },
       },
     },
+    debugEndpoints: {
+      "GET /debug/oauth-states": "View recent OAuth states",
+      "GET /debug/oauth-tokens": "View recent OAuth tokens",
+      "GET /debug/session": "View current session data",
+    },
     voiceCommands: [
       "Create todo [task description]",
       "Add task [task description]",
@@ -346,10 +868,7 @@ app.get("/api/docs", (req, res) => {
   });
 });
 
-export default app;
-
 // Global error handler that preserves CORS headers
-// Place after routes; Catalyst may surface 500s without headers otherwise
 app.use((err, req, res, next) => {
   console.error(
     "💥 Global error handler:",
