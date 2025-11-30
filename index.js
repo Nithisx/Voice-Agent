@@ -2,7 +2,7 @@ import express from "express";
 import session from "express-session";
 import axios from "axios";
 import { v4 as uuidv4 } from "uuid";
-import catalystSDK from "zcatalyst-sdk-node";
+import OAuthToken from "./Models/oauthModel.js";
 import dotenv from "dotenv";
 import cors from "cors";
 import connectDB from "./Db/db.js";
@@ -136,14 +136,10 @@ app.get("/start", async (req, res) => {
       return res.status(400).send("Missing cliq_user_id");
     }
 
-    const catalystApp = catalystSDK.initialize(req);
-    const zcql = catalystApp.zcql();
+    // Check MongoDB for an existing oauth token for this external user id
+    const existing = await OAuthToken.findOne({ external_user_id: String(cliqUserId) }).lean();
 
-    // Use ZCQL to check if a row exists for this external_user_id
-    const query = `SELECT * FROM oauth_tokens WHERE external_user_id = '${cliqUserId}'`;
-    const result = await zcql.executeZCQLQuery(query); // returns array of rows [web:123]
-
-    if (result && result.length > 0) {
+    if (existing) {
       // token exists → go directly to frontend voice UI
       const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
         cliqUserId
@@ -155,8 +151,14 @@ app.get("/start", async (req, res) => {
     req.session.cliq_user_id = cliqUserId;
     return res.redirect("/auth/login");
   } catch (err) {
-    console.error("Start route error:", err.response?.data || err.message);
-    return res.status(500).send("Start failed: " + err.message);
+    // Log full error for easier debugging (response body, stack, etc.)
+    console.error("Start route error - full error:", err);
+    console.error("Start route error - response data:", err?.response?.data);
+    console.error("Start route error - message:", err?.message);
+    console.error("Start route error - stack:", err?.stack);
+
+    const detail = err?.response?.data || err?.message || String(err);
+    return res.status(500).send("Start failed: " + detail);
   }
 });
 
@@ -220,22 +222,18 @@ app.get("/auth/callback", async (req, res) => {
 
     const cliqUserId = req.session.cliq_user_id || null;
 
-    const catalystApp = catalystSDK.initialize(req);
-    const datastore = catalystApp.datastore();
-    const table = datastore.table("oauth_tokens");
-
-    const row = {
+    // Persist tokens in MongoDB
+    const doc = new OAuthToken({
       provider: "Zoho",
       external_user_id: cliqUserId,
       access_token: accessToken,
       refresh_token: refreshToken,
       expires_at: expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : null,
       scope: SCOPE,
-      created_at: new Date().toISOString(),
-    };
-
-    const inserted = await table.insertRow(row);
-    console.log("Inserted oauth row:", inserted);
+      profile: userProfile || null,
+    });
+    const inserted = await doc.save();
+    console.log("Inserted oauth row into MongoDB:", inserted._id);
 
     const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
       cliqUserId || ""
@@ -377,10 +375,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-
-
 app.listen(process.env.PORT || 3000, () => {
-  console.log(
-    `🚀 Server running on port ${process.env.PORT || 3000} `
-  );
+  console.log(`🚀 Server running on port ${process.env.PORT || 3000} `);
 });
