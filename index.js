@@ -405,7 +405,7 @@ app.get("/auth/callback", async (req, res) => {
 
     // Simple validation - just check if state matches session
     const cliqUserId = stateToken || req.session?.cliq_user_id || null;
-    
+
     console.log("✅ Using Cliq User ID:", cliqUserId);
 
     const tokenRes = await axios.post(
