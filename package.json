@@ -15,6 +15,7 @@
     "express-session": "^1.18.2",
     "mongoose": "^8.0.0",
     "multer": "^2.0.2",
+    "nodemon": "^3.1.11",
     "uuid": "^8.3.2",
     "zcatalyst-sdk-node": "^3.1.1"
   }
