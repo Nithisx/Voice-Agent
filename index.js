@@ -207,7 +207,19 @@ app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     database: dbConnected ? "connected" : "disconnected",
+    sessionStore: sessionStore ? "configured" : "memory",
     timestamp: new Date().toISOString(),
+  });
+});
+
+// Debug endpoint to check environment
+app.get("/debug/env", (req, res) => {
+  res.json({
+    hasOAuthConfig: !!(OAUTH_AUTHORIZE_URL && CLIENT_ID && REDIRECT_URI),
+    hasFrontendUrl: !!FRONTEND_VOICE_URL,
+    redirectUri: REDIRECT_URI,
+    frontendUrl: FRONTEND_VOICE_URL,
+    nodeEnv: process.env.NODE_ENV,
   });
 });
 
@@ -245,6 +257,8 @@ app.get("/start", async (req, res) => {
 
     if (existingToken) {
       console.log("✅ Found existing token:", existingToken._id);
+      console.log("📊 Token expires_at:", existingToken.expires_at);
+      console.log("📊 Token created:", existingToken.createdAt);
 
       // Check token expiration
       const now = Math.floor(Date.now() / 1000);
@@ -256,6 +270,10 @@ app.get("/start", async (req, res) => {
 
         if (!FRONTEND_VOICE_URL) {
           console.error("❌ FRONTEND_VOICE_URL not configured");
+          console.error(
+            "❌ Available env:",
+            Object.keys(process.env).filter((k) => k.includes("FRONT"))
+          );
           return res.status(500).json({
             error: "FRONTEND_VOICE_URL not configured",
             cliq_user_id: cliqUserId,
@@ -265,9 +283,11 @@ app.get("/start", async (req, res) => {
         const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
           cliqUserId
         )}`;
-        console.log(`🔀 Redirecting to: ${redirectUrl}`);
+        console.log(`🔀 Redirecting to frontend: ${redirectUrl}`);
         return res.redirect(redirectUrl);
       }
+    } else {
+      console.log("ℹ️  No existing token found for user:", cliqUserId);
     }
 
     // No valid token, start OAuth flow
@@ -373,6 +393,10 @@ app.get("/auth/login", async (req, res) => {
 // OAuth callback endpoint
 app.get("/auth/callback", async (req, res) => {
   console.log("\n🔄 CALLBACK endpoint called");
+  console.log("🔍 Full query params:", JSON.stringify(req.query, null, 2));
+  console.log("🔍 Session exists:", !!req.session);
+  console.log("🔍 Session ID:", req.sessionID);
+  console.log("🔍 Full session data:", JSON.stringify(req.session, null, 2));
 
   try {
     const { code, state, error, error_description } = req.query;
@@ -389,14 +413,22 @@ app.get("/auth/callback", async (req, res) => {
 
     if (!code) {
       console.error("❌ No authorization code received");
+      console.error("❌ Query params:", req.query);
       return res.status(400).send("No authorization code received");
     }
-
-    console.log(`📝 Received code: ${code.slice(0, 10)}...`);
-    console.log(`📝 Received state: ${state?.slice(0, 8)}...`);
-    console.log(`📝 Session state: ${req.session.oauth_state?.slice(0, 8)}...`);
-
     // Validate state
+    if (!req.session || !req.session.oauth_state) {
+      console.error("❌ Session lost or oauth_state missing!");
+      console.error("  Session exists:", !!req.session);
+      console.error("  Session oauth_state:", req.session?.oauth_state);
+      console.error("  Received state:", state);
+      return res
+        .status(400)
+        .send(
+          "Session lost during OAuth flow. Please try again from the beginning."
+        );
+    }
+
     if (!state || state !== req.session.oauth_state) {
       console.error("❌ OAuth state mismatch!");
       console.error("  Received:", state);
@@ -453,7 +485,12 @@ app.get("/auth/callback", async (req, res) => {
 
     if (!cliqUserId) {
       console.error("❌ No cliq_user_id in session!");
-      return res.status(400).send("Session lost - no user ID found");
+      console.error("❌ Full session:", JSON.stringify(req.session, null, 2));
+      return res
+        .status(400)
+        .send(
+          "Session lost - no user ID found. Please try again from the beginning."
+        );
     }
 
     console.log(`👤 Saving token for user: ${cliqUserId}`);
@@ -488,19 +525,25 @@ app.get("/auth/callback", async (req, res) => {
     // Redirect to frontend
     if (!FRONTEND_VOICE_URL) {
       console.error("❌ FRONTEND_VOICE_URL not configured");
+      console.error(
+        "❌ Available env vars:",
+        Object.keys(process.env).filter((k) => k.includes("FRONT"))
+      );
       return res.status(500).send("FRONTEND_VOICE_URL not configured");
     }
 
     const redirectUrl = `${FRONTEND_VOICE_URL}?cliq_user_id=${encodeURIComponent(
       cliqUserId
     )}`;
-    console.log(`🔀 Redirecting to: ${redirectUrl}`);
+    console.log(`🎉 OAuth flow completed successfully!`);
+    console.log(`🔀 Redirecting to frontend: ${redirectUrl}`);
 
     return res.redirect(redirectUrl);
   } catch (err) {
     console.error("💥 CALLBACK endpoint error:");
     console.error("  Message:", err.message);
     console.error("  Stack:", err.stack);
+    console.error("  Error type:", err.constructor.name);
 
     if (err.response) {
       console.error("  Response Status:", err.response.status);
@@ -517,12 +560,49 @@ app.get("/auth/callback", async (req, res) => {
       console.error("    Headers:", err.config?.headers);
     }
 
-    return res.status(500).json({
-      error: "OAuth callback failed",
-      message: err.message,
-      details: err.response?.data || null,
-    });
+    // Send a more user-friendly error page
+    return res.status(500).send(`
+      <html>
+        <body>
+          <h1>OAuth Error</h1>
+          <p>An error occurred during authentication: ${err.message}</p>
+          <p><a href="/start?cliq_user_id=${
+            req.session?.cliq_user_id || ""
+          }">Try again</a></p>
+          <details>
+            <summary>Technical Details</summary>
+            <pre>${err.stack}</pre>
+          </details>
+        </body>
+      </html>
+    `);
   }
+});
+
+// Test endpoint to verify server is working
+app.get("/test", (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Server Test</title></head>
+      <body>
+        <h1>✅ Server is running!</h1>
+        <ul>
+          <li>Database: ${dbConnected ? "✅ Connected" : "❌ Disconnected"}</li>
+          <li>Session Store: ${
+            sessionStore ? "✅ Configured" : "⚠️ Memory"
+          }</li>
+          <li>Session ID: ${req.sessionID}</li>
+          <li>Environment: ${process.env.NODE_ENV || "development"}</li>
+        </ul>
+        <h2>Available Endpoints:</h2>
+        <ul>
+          <li><a href="/health">/health</a></li>
+          <li><a href="/debug/env">/debug/env</a></li>
+          <li><a href="/start?cliq_user_id=test123">/start?cliq_user_id=test123</a></li>
+        </ul>
+      </body>
+    </html>
+  `);
 });
 
 // Import and use routes
