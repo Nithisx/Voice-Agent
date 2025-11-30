@@ -1,6 +1,7 @@
 import { getTranscriberService } from "../Transcriber.js";
 import detectIntent from "../services/intent.js";
 import { createTodo, listTodos, completeTodo } from "./todoController.js";
+import { createNote, listNotes, deleteNote } from "./noteController.js";
 import formatResponse from "../utils/response.js";
 import connectDB from "../Db/db.js";
 
@@ -145,13 +146,110 @@ export const processVoice = async (req, res) => {
       });
     }
 
+    if (intent === "CREATE_NOTE") {
+      if (!entity || entity.trim() === "") {
+        return res.json({
+          success: false,
+          message: "Please specify what note you want to create",
+          transcription,
+        });
+      }
+
+      // Create note using controller
+      const mockReq = { body: { userId, title: entity, content: entity } };
+      const mockRes = formatResponse();
+      result = await createNote(mockReq, mockRes);
+
+      return res.json({
+        success: true,
+        intent,
+        transcription,
+        response: `Created note: "${entity}"`,
+        data: result,
+        aiGenerated: aiGenerated,
+        confidence: confidence,
+      });
+    }
+
+    if (intent === "SHOW_NOTES") {
+      const mockReq = { params: { userId } };
+      const mockRes = formatResponse();
+      result = await listNotes(mockReq, mockRes);
+
+      const notes = result.notes || [];
+      const noteCount = notes.length;
+
+      let response;
+      if (noteCount === 0) {
+        response = "You have no notes";
+      } else {
+        response = `Here are your ${noteCount} note(s):\n`;
+        notes.forEach((note, index) => {
+          response += `${index + 1}. ${note.title}\n`;
+        });
+        response = response.trim(); // Remove trailing newline
+      }
+
+      return res.json({
+        success: true,
+        intent,
+        transcription,
+        response: response,
+        data: result,
+        noteList: notes, // Include the actual note list for easy access
+        count: noteCount,
+        aiGenerated: aiGenerated,
+        confidence: confidence,
+      });
+    }
+
+    if (intent === "DELETE_NOTE") {
+      if (!entity || entity.trim() === "") {
+        return res.json({
+          success: false,
+          message: "Please specify which note you want to delete",
+          transcription,
+          aiGenerated: aiGenerated,
+          confidence: confidence,
+        });
+      }
+
+      // Delete note using controller
+      const mockReq = { body: { userId, title: entity } };
+      const mockRes = formatResponse();
+      result = await deleteNote(mockReq, mockRes);
+
+      if (result.error) {
+        return res.json({
+          success: false,
+          intent,
+          transcription,
+          response: result.message,
+          suggestions: result.suggestions || null,
+          data: result,
+          aiGenerated: aiGenerated,
+          confidence: confidence,
+        });
+      }
+
+      return res.json({
+        success: true,
+        intent,
+        transcription,
+        response: result.message,
+        data: result,
+        aiGenerated: aiGenerated,
+        confidence: confidence,
+      });
+    }
+
     if (intent === "HELP") {
       return res.json({
         success: true,
         intent,
         transcription,
         response:
-          "I can help you create and manage todo items. Say 'create todo [your task]' to add a new task, 'show my todos' to see your list, or 'completed [task]' to mark a task as done.",
+          "I can help you create and manage todo items and notes. Say 'create todo [your task]' to add a task, 'show my todos' to see your list, 'create note [content]' to add a note, or 'fetch my notes' to see your notes.",
         availableCommands: [
           "Create todo [task description]",
           "Add task [task description]",
@@ -160,6 +258,11 @@ export const processVoice = async (req, res) => {
           "Completed [task description]",
           "Done with [task description]",
           "Finished [task description]",
+          "Create note [note content]",
+          "Add note [note content]",
+          "Fetch my notes",
+          "Show my notes",
+          "Delete note [note title]",
         ],
         aiGenerated: aiGenerated,
         confidence: confidence,
@@ -184,7 +287,7 @@ export const processVoice = async (req, res) => {
       success: true,
       intent: intent || "UNKNOWN",
       transcription,
-      response: `I heard: "${transcription}". I can help you create todos or show your todo list. Try saying "create todo buy groceries" or "show my todos".`,
+      response: `I heard: "${transcription}". I can help you create todos, notes, or show your lists. Try saying "create todo buy groceries", "create note react is a front end", "show my todos", or "fetch my notes".`,
       confidence: confidence || 0.3,
     });
   } catch (err) {

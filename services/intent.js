@@ -30,20 +30,26 @@ AVAILABLE INTENTS:
 1. CREATE_TODO - User wants to create a new todo item
 2. SHOW_TODOS - User wants to see their existing todo list
 3. COMPLETE_TODO - User wants to mark a todo item as completed/done and remove it
-4. OTHER - General questions or requests not related to todos
+4. CREATE_NOTE - User wants to create a new note
+5. SHOW_NOTES - User wants to see their existing notes
+6. DELETE_NOTE - User wants to delete a specific note
+7. OTHER - General questions or requests not related to todos or notes
 
 INSTRUCTIONS:
 - If the user wants to create/add a todo/task/reminder, respond with CREATE_TODO intent
 - If the user wants to view/show/list their todos/tasks, respond with SHOW_TODOS intent
 - If the user wants to complete/finish/done a specific task, respond with COMPLETE_TODO intent
+- If the user wants to create/add a note, respond with CREATE_NOTE intent
+- If the user wants to view/show/list/fetch their notes, respond with SHOW_NOTES intent
+- If the user wants to delete/remove a note, respond with DELETE_NOTE intent
 - For any other question (like "What is the capital of India?"), use OTHER intent and provide a helpful answer
 
 USER MESSAGE: "${text}"
 
 Respond in this EXACT JSON format:
 {
-  "intent": "CREATE_TODO|SHOW_TODOS|COMPLETE_TODO|OTHER",
-  "entity": "extracted task text for CREATE_TODO, task to complete for COMPLETE_TODO, null for SHOW_TODOS, or your answer for OTHER",
+  "intent": "CREATE_TODO|SHOW_TODOS|COMPLETE_TODO|CREATE_NOTE|SHOW_NOTES|DELETE_NOTE|OTHER",
+  "entity": "extracted task/note text for CREATE intents, task/note to complete/delete, null for SHOW intents, or your answer for OTHER",
   "confidence": 0.0-1.0
 }
 
@@ -58,12 +64,22 @@ Examples:
 - "Done with call mom" → {"intent": "COMPLETE_TODO", "entity": "call mom", "confidence": 0.95}
 - "Finished grocery shopping" → {"intent": "COMPLETE_TODO", "entity": "grocery shopping", "confidence": 0.95}
 - "Complete task buy milk" → {"intent": "COMPLETE_TODO", "entity": "buy milk", "confidence": 0.95}
+- "Create me a note called react is a front end" → {"intent": "CREATE_NOTE", "entity": "react is a front end", "confidence": 0.95}
+- "Create a note about JavaScript" → {"intent": "CREATE_NOTE", "entity": "JavaScript", "confidence": 0.95}
+- "Add note meeting summary" → {"intent": "CREATE_NOTE", "entity": "meeting summary", "confidence": 0.95}
+- "Fetch my notes" → {"intent": "SHOW_NOTES", "entity": null, "confidence": 0.95}
+- "Show all my notes" → {"intent": "SHOW_NOTES", "entity": null, "confidence": 0.95}
+- "List my notes" → {"intent": "SHOW_NOTES", "entity": null, "confidence": 0.95}
+- "Delete note react" → {"intent": "DELETE_NOTE", "entity": "react", "confidence": 0.95}
+- "Remove note JavaScript" → {"intent": "DELETE_NOTE", "entity": "JavaScript", "confidence": 0.95}
 - "What is the capital of India?" → {"intent": "OTHER", "entity": "The capital of India is New Delhi.", "confidence": 0.95}
 - "How's the weather?" → {"intent": "OTHER", "entity": "I'm a todo assistant and don't have access to weather data. You can check weather apps or websites for current conditions.", "confidence": 0.95}
 
 CRITICAL INSTRUCTIONS:
 - For CREATE_TODO, extract ONLY the task description (remove words like "create", "todo", "task", "add", "me", "a", "called")
 - For COMPLETE_TODO, extract ONLY the task description to complete (remove words like "completed", "done", "finished", "complete", "task")
+- For CREATE_NOTE, extract ONLY the note content (remove words like "create", "note", "add", "me", "a", "called", "about")
+- For DELETE_NOTE, extract ONLY the note title to delete (remove words like "delete", "remove", "note")
 - For OTHER intent, provide a helpful and polite response
 - Return ONLY valid JSON, NO markdown code blocks, NO additional text, NO formatting
 - Do NOT wrap the response in triple backticks or code blocks
@@ -96,9 +112,15 @@ CRITICAL INSTRUCTIONS:
       // Validate the response structure
       if (
         !parsed.intent ||
-        !["CREATE_TODO", "SHOW_TODOS", "COMPLETE_TODO", "OTHER"].includes(
-          parsed.intent
-        )
+        ![
+          "CREATE_TODO",
+          "SHOW_TODOS",
+          "COMPLETE_TODO",
+          "CREATE_NOTE",
+          "SHOW_NOTES",
+          "DELETE_NOTE",
+          "OTHER",
+        ].includes(parsed.intent)
       ) {
         console.log(
           "❌ Invalid intent in AI response, falling back to basic detection"
@@ -207,6 +229,65 @@ function detectIntentBasic(text, userId = null) {
     return {
       intent: "SHOW_TODOS",
       entity: null,
+      userId,
+      confidence: 0.7,
+      aiGenerated: false,
+    };
+  }
+
+  // Create Note - Multiple variations
+  if (
+    (lower.includes("create") ||
+      lower.includes("add") ||
+      lower.includes("make")) &&
+    lower.includes("note")
+  ) {
+    // Extract the note text
+    let item = lower
+      .replace(/create\s*(me)?\s*(a)?\s*note\s*(called|about)?\s*/i, "")
+      .replace(/add\s*(a)?\s*note\s*(called|about)?\s*/i, "")
+      .replace(/make\s*(a)?\s*note\s*(called|about)?\s*/i, "")
+      .trim();
+    return {
+      intent: "CREATE_NOTE",
+      entity: item,
+      userId,
+      confidence: 0.7,
+      aiGenerated: false,
+    };
+  }
+
+  // Show/List Notes - Multiple variations
+  if (
+    (lower.includes("show") ||
+      lower.includes("list") ||
+      lower.includes("get") ||
+      lower.includes("fetch") ||
+      lower.includes("see")) &&
+    lower.includes("note")
+  ) {
+    return {
+      intent: "SHOW_NOTES",
+      entity: null,
+      userId,
+      confidence: 0.7,
+      aiGenerated: false,
+    };
+  }
+
+  // Delete Note - Multiple variations
+  if (
+    (lower.includes("delete") || lower.includes("remove")) &&
+    lower.includes("note")
+  ) {
+    // Extract the note title
+    let item = lower
+      .replace(/delete\s*(the)?\s*note\s*/i, "")
+      .replace(/remove\s*(the)?\s*note\s*/i, "")
+      .trim();
+    return {
+      intent: "DELETE_NOTE",
+      entity: item,
       userId,
       confidence: 0.7,
       aiGenerated: false,

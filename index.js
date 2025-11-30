@@ -635,9 +635,11 @@ app.get("/test", (req, res) => {
 // Import and use routes
 const { default: transcribeRouter } = await import("./routes/voiceroutes.js");
 const { default: todoRouter } = await import("./routes/todoRoutes.js");
+const { default: noteRouter } = await import("./routes/noteRoutes.js");
 
 app.use("/api", transcribeRouter);
 app.use("/api/todos", todoRouter);
+app.use("/api/notes", noteRouter);
 
 // Global error handler
 app.use((err, req, res, next) => {
