@@ -240,6 +240,12 @@ app.get("/start", async (req, res) => {
 
     console.log(`👤 Processing user: ${cliqUserId}`);
 
+    // Clear any existing OAuth state from previous attempts
+    if (req.session.oauth_state) {
+      console.log("🧹 Clearing old oauth_state from session");
+      delete req.session.oauth_state;
+    }
+
     if (!dbConnected) {
       console.warn("⚠️  Database not connected, skipping token check");
       req.session.cliq_user_id = cliqUserId;
@@ -292,7 +298,12 @@ app.get("/start", async (req, res) => {
 
     // No valid token, start OAuth flow
     console.log("🔐 No valid token, starting OAuth flow");
+
+    // Clear old oauth_state and set new cliq_user_id
     req.session.cliq_user_id = cliqUserId;
+    delete req.session.oauth_state; // Important: clear old state
+
+    console.log("🧹 Session cleaned, ready for fresh OAuth flow");
 
     // Explicitly save session before redirect
     await new Promise((resolve, reject) => {
@@ -301,7 +312,7 @@ app.get("/start", async (req, res) => {
           console.error("❌ Session save error:", err);
           reject(err);
         } else {
-          console.log("💾 Session saved successfully");
+          console.log("💾 Session saved successfully (oauth_state cleared)");
           resolve();
         }
       });
@@ -330,6 +341,10 @@ app.get("/start", async (req, res) => {
 // Login endpoint
 app.get("/auth/login", async (req, res) => {
   console.log("\n🔐 LOGIN endpoint called");
+  console.log(
+    "🔍 Current session oauth_state:",
+    req.session.oauth_state?.slice(0, 8) + "..." || "none"
+  );
 
   try {
     // Check if required env vars are present
@@ -338,8 +353,9 @@ app.get("/auth/login", async (req, res) => {
       return res.status(500).send("OAuth not properly configured");
     }
 
+    // Generate NEW state (this will replace any old state)
     const state = uuidv4();
-    console.log(`🎲 Generated state: ${state.slice(0, 8)}...`);
+    console.log(`🎲 Generated NEW state: ${state.slice(0, 8)}...`);
 
     // Handle cliq_user_id from query or session
     const cliqUserId = req.query.cliq_user_id || req.session.cliq_user_id;
@@ -351,7 +367,9 @@ app.get("/auth/login", async (req, res) => {
       console.warn("⚠️  No cliq_user_id available");
     }
 
+    // Set NEW state (overwrites any old state)
     req.session.oauth_state = state;
+    console.log(`✅ NEW oauth_state saved to session: ${state.slice(0, 8)}...`);
 
     // Save session before redirect
     await new Promise((resolve, reject) => {
@@ -416,12 +434,20 @@ app.get("/auth/callback", async (req, res) => {
       console.error("❌ Query params:", req.query);
       return res.status(400).send("No authorization code received");
     }
+
+    console.log(`📝 Received code: ${code.slice(0, 10)}...`);
+    console.log(`📝 Received state: ${state?.slice(0, 8)}...`);
+    console.log(
+      `📝 Session oauth_state: ${req.session.oauth_state?.slice(0, 8)}...`
+    );
+    console.log(`📝 Session cliq_user_id: ${req.session.cliq_user_id}`);
+
     // Validate state
     if (!req.session || !req.session.oauth_state) {
       console.error("❌ Session lost or oauth_state missing!");
       console.error("  Session exists:", !!req.session);
       console.error("  Session oauth_state:", req.session?.oauth_state);
-      console.error("  Received state:", state);
+      console.error("  Received state from Zoho:", state);
       return res
         .status(400)
         .send(
@@ -431,12 +457,13 @@ app.get("/auth/callback", async (req, res) => {
 
     if (!state || state !== req.session.oauth_state) {
       console.error("❌ OAuth state mismatch!");
-      console.error("  Received:", state);
-      console.error("  Expected:", req.session.oauth_state);
+      console.error("  Received from Zoho:", state);
+      console.error("  Expected in session:", req.session.oauth_state);
+      console.error("  Match:", state === req.session.oauth_state);
       return res.status(400).send("Invalid OAuth state - possible CSRF attack");
     }
 
-    console.log("✅ State validation passed");
+    console.log("✅ State validation passed - states match!");
 
     // Exchange code for tokens
     console.log("🔄 Exchanging code for tokens...");
@@ -646,19 +673,38 @@ app.use((err, req, res, next) => {
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const isProduction = process.env.NODE_ENV === "production";
+
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`🚀 Server started successfully`);
   console.log(`📡 Port: ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || "development"}`);
+  console.log(`🔒 Cookie Secure: ${isProduction}`);
+  console.log(`🔒 Cookie SameSite: ${isProduction ? "none" : "lax"}`);
+  console.log(`🔒 Proxy Trust: enabled`);
   console.log(
     `🔐 Session Secret: ${
       process.env.SESSION_SECRET
-        ? "configured"
-        : "using default (change in production!)"
+        ? "✅ configured"
+        : "⚠️  using default (change in production!)"
     }`
   );
-  console.log(`🗄️  Database: ${dbConnected ? "connected" : "not connected"}`);
+  console.log(
+    `🗄️  Database: ${dbConnected ? "✅ connected" : "❌ disconnected"}`
+  );
+  console.log(
+    `💾 Session Store: ${
+      sessionStore ? "✅ MongoDB" : "⚠️  Memory (not production-safe)"
+    }`
+  );
+
+  if (!isProduction) {
+    console.log(`\n🌐 Local Access:`);
+    console.log(`   👉 http://localhost:${PORT}/test`);
+    console.log(`   👉 http://localhost:${PORT}/health`);
+  }
+
   console.log(`${"=".repeat(60)}\n`);
 });
 
