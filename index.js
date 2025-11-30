@@ -677,7 +677,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
 
-app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`🚀 Server started successfully`);
   console.log(`📡 Port: ${PORT}`);
@@ -705,9 +705,14 @@ app.listen(PORT, "0.0.0.0", () => {
     console.log(`\n🌐 Local Access:`);
     console.log(`   👉 http://localhost:${PORT}/test`);
     console.log(`   👉 http://localhost:${PORT}/health`);
+    console.log(`   👉 ws://localhost:${PORT}/voice-agent (WebSocket)`);
   }
 
   console.log(`${"=".repeat(60)}\n`);
 });
+
+// Initialize WebSocket server
+const { setupWebSocket } = await import("./websocket/voiceWebSocket.js");
+setupWebSocket(server);
 
 export default app;
