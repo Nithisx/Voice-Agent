@@ -636,10 +636,18 @@ app.get("/test", (req, res) => {
 const { default: transcribeRouter } = await import("./routes/voiceroutes.js");
 const { default: todoRouter } = await import("./routes/todoRoutes.js");
 const { default: noteRouter } = await import("./routes/noteRoutes.js");
+const { default: assignedTaskRouter } = await import(
+  "./routes/assignedTaskRoutes.js"
+);
+const { default: blockedTaskRouter } = await import(
+  "./routes/blockedTaskRoutes.js"
+);
 
 app.use("/api", transcribeRouter);
 app.use("/api/todos", todoRouter);
 app.use("/api/notes", noteRouter);
+app.use("/api/assigned-tasks", assignedTaskRouter);
+app.use("/api/blocked-tasks", blockedTaskRouter);
 
 // Global error handler
 app.use((err, req, res, next) => {
